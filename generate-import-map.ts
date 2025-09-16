@@ -80,7 +80,7 @@ function getFileGroup(filePath: string): string {
 function resolveImportPath(importPath: string, sourceFile: string): string {
   // Handle aliases
   if (importPath.startsWith('@/')) {
-    return path.join(process.cwd(), 'ComfyUI_frontend', 'src', importPath.slice(2))
+    return path.join(process.cwd(), 'src', importPath.slice(2))
   }
 
   // Handle relative paths
@@ -172,7 +172,17 @@ function detectCircularDependencies(
 
 // Generate dependency graph
 async function generateDependencyGraph(): Promise<DependencyGraph> {
-  const sourceFiles = await glob('ComfyUI_frontend/src/**/*.{ts,tsx,vue,mts}', {
+  // Save original cwd and change to ComfyUI_frontend
+  const originalCwd = process.cwd()
+  const frontendPath = path.join(originalCwd, 'ComfyUI_frontend')
+
+  if (!fs.existsSync(frontendPath)) {
+    throw new Error('ComfyUI_frontend directory not found. Please clone the repository first.')
+  }
+
+  process.chdir(frontendPath)
+
+  const sourceFiles = await glob('src/**/*.{ts,tsx,vue,mts}', {
     ignore: [
       '**/node_modules/**',
       '**/*.d.ts',
@@ -321,6 +331,9 @@ async function generateDependencyGraph(): Promise<DependencyGraph> {
   circularDeps.forEach((dep, index) => {
     console.log(`  ${index + 1}. ${dep.chain.join(' → ')}`)
   })
+
+  // Change back to original directory before returning
+  process.chdir(originalCwd)
 
   return {
     nodes: Array.from(nodes.values()),
