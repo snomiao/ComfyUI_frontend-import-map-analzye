@@ -10,6 +10,8 @@ This project provides utilities to analyze the import structure of ComfyUI's fro
 
 View the interactive import map visualization at: https://comfyui-frontend-import-map.pages.dev/
 
+![Demo](demo.png)
+
 ## Features
 
 - **Import Map Generation**: Automatically scans and generates a comprehensive import map from TypeScript/JavaScript files
@@ -43,4 +45,4 @@ This tool helps ComfyUI developers and contributors:
 
 ## License
 
-This project is part of the ComfyUI ecosystem analysis tools.
+This project is part of the ComfyUI ecosystem analysis tools.i
