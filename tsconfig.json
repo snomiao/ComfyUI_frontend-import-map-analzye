@@ -25,5 +25,7 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  "include": ["generate-import-map.ts"],
+  "exclude": ["ComfyUI_frontend/**", "node_modules/**", "dist/**"]
 }

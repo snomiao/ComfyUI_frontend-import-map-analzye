@@ -40,13 +40,13 @@ function extractImports(filePath: string): ImportInfo {
   let match
 
   while ((match = importRegex.exec(content)) !== null) {
-    imports.push(match[1])
+    if (match[1]) imports.push(match[1])
   }
 
   // Also match dynamic imports
   const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g
   while ((match = dynamicImportRegex.exec(content)) !== null) {
-    imports.push(match[1])
+    if (match[1]) imports.push(match[1])
   }
 
   return {
@@ -140,7 +140,11 @@ function detectCircularDependencies(
           // Create edges for the circular dependency
           const edges: Array<{ source: string; target: string }> = []
           for (let i = 0; i < chain.length - 1; i++) {
-            edges.push({ source: chain[i], target: chain[i + 1] })
+            const source = chain[i]
+            const target = chain[i + 1]
+            if (source && target) {
+              edges.push({ source, target })
+            }
           }
 
           // Check if this cycle is already recorded (avoid duplicates)
