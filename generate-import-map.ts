@@ -60,18 +60,18 @@ function getFileGroup(filePath: string): string {
   const relativePath = path.relative(process.cwd(), filePath)
 
   if (relativePath.includes('node_modules')) return 'external'
-  if (relativePath.startsWith('src/components')) return 'components'
-  if (relativePath.startsWith('src/stores')) return 'stores'
-  if (relativePath.startsWith('src/services')) return 'services'
-  if (relativePath.startsWith('src/views')) return 'views'
-  if (relativePath.startsWith('src/composables')) return 'composables'
-  if (relativePath.startsWith('src/utils')) return 'utils'
-  if (relativePath.startsWith('src/types')) return 'types'
-  if (relativePath.startsWith('src/extensions')) return 'extensions'
-  if (relativePath.startsWith('src/lib')) return 'lib'
-  if (relativePath.startsWith('src/scripts')) return 'scripts'
-  if (relativePath.startsWith('tests')) return 'tests'
-  if (relativePath.startsWith('browser_tests')) return 'browser_tests'
+  if (relativePath.includes('src/components')) return 'components'
+  if (relativePath.includes('src/stores')) return 'stores'
+  if (relativePath.includes('src/services')) return 'services'
+  if (relativePath.includes('src/views')) return 'views'
+  if (relativePath.includes('src/composables')) return 'composables'
+  if (relativePath.includes('src/utils')) return 'utils'
+  if (relativePath.includes('src/types')) return 'types'
+  if (relativePath.includes('src/extensions')) return 'extensions'
+  if (relativePath.includes('src/lib')) return 'lib'
+  if (relativePath.includes('src/scripts')) return 'scripts'
+  if (relativePath.includes('tests')) return 'tests'
+  if (relativePath.includes('browser_tests')) return 'browser_tests'
 
   return 'other'
 }
@@ -80,7 +80,7 @@ function getFileGroup(filePath: string): string {
 function resolveImportPath(importPath: string, sourceFile: string): string {
   // Handle aliases
   if (importPath.startsWith('@/')) {
-    return path.join(process.cwd(), 'src', importPath.slice(2))
+    return path.join(process.cwd(), 'ComfyUI_frontend', 'src', importPath.slice(2))
   }
 
   // Handle relative paths
@@ -172,7 +172,7 @@ function detectCircularDependencies(
 
 // Generate dependency graph
 async function generateDependencyGraph(): Promise<DependencyGraph> {
-  const sourceFiles = await glob('src/**/*.{ts,tsx,vue,mts}', {
+  const sourceFiles = await glob('ComfyUI_frontend/src/**/*.{ts,tsx,vue,mts}', {
     ignore: [
       '**/node_modules/**',
       '**/*.d.ts',
@@ -773,20 +773,19 @@ async function main() {
     }
 
     // Save JSON data
-    const jsonPath = path.join(process.cwd(), 'scripts', 'map', 'import-map.json')
-    fs.mkdirSync(path.dirname(jsonPath), { recursive: true })
+    const jsonPath = path.join(process.cwd(), 'import-map.json')
     fs.writeFileSync(jsonPath, JSON.stringify(graph, null, 2))
     console.log(`Saved JSON data to ${jsonPath}`)
 
     // Generate and save HTML visualization
     const html = generateHTML(graph)
-    const htmlPath = path.join(process.cwd(), 'scripts', 'map', 'import-map.html')
+    const htmlPath = path.join(process.cwd(), 'import-map.html')
     fs.writeFileSync(htmlPath, html)
     console.log(`Saved HTML visualization to ${htmlPath}`)
 
     console.log('✅ Import map generation complete!')
     console.log(
-      'Open scripts/map/import-map.html in a browser to view the visualization'
+      'Open import-map.html in a browser to view the visualization'
     )
   } catch (error) {
     console.error('Error generating import map:', error)
