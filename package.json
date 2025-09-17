@@ -1,6 +1,32 @@
 {
-  "name": "main",
+  "name": "comfyui-frontend-import-map-analyzer",
+  "version": "2.0.0",
+  "description": "A powerful tool to analyze and visualize import dependencies in TypeScript/Vue.js codebases",
+  "main": "src/main.ts",
   "private": true,
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --hot src/main.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "build": "bun build src/main.ts --target=node --outdir=dist",
+    "legacy": "bun run generate-import-map.ts",
+    "deploy": "wrangler pages deploy dist --project-name=comfyui-frontend-import-map"
+  },
+  "keywords": [
+    "import-map",
+    "dependency-analysis",
+    "typescript",
+    "vue",
+    "circular-dependencies",
+    "visualization",
+    "comfyui"
+  ],
+  "author": "snomiao",
+  "license": "MIT",
+  "dependencies": {
+    "fast-glob": "^3.3.3"
+  },
   "devDependencies": {
     "@ast-grep/napi": "^0.39.5",
     "@types/bun": "latest"
@@ -8,7 +34,15 @@
   "peerDependencies": {
     "typescript": "^5"
   },
-  "dependencies": {
-    "fast-glob": "^3.3.3"
-  }
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snomiao/ComfyUI_frontend-import-map-analzye.git"
+  },
+  "bugs": {
+    "url": "https://github.com/snomiao/ComfyUI_frontend-import-map-analzye/issues"
+  },
+  "homepage": "https://comfyui-frontend-import-map.pages.dev/"
 }
