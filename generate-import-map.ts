@@ -293,7 +293,19 @@ async function generateDependencyGraph(): Promise<DependencyGraph> {
   const frontendPath = path.join(originalCwd, 'ComfyUI_frontend')
 
   if (!fs.existsSync(frontendPath)) {
-    throw new Error('ComfyUI_frontend directory not found. Please clone the repository first.')
+    console.log('ComfyUI_frontend submodule not found. Initializing...')
+    // Initialize and update the submodule
+    const { execSync } = await import('child_process')
+    try {
+      execSync('git submodule init', { stdio: 'inherit' })
+      execSync('git submodule update', { stdio: 'inherit' })
+    } catch (error) {
+      throw new Error('Failed to initialize ComfyUI_frontend submodule. Please run: git submodule update --init')
+    }
+
+    if (!fs.existsSync(frontendPath)) {
+      throw new Error('ComfyUI_frontend submodule still not found after initialization.')
+    }
   }
 
   process.chdir(frontendPath)
