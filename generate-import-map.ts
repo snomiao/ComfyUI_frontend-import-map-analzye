@@ -2,7 +2,6 @@
 import glob from 'fast-glob'
 import fs from 'fs'
 import path from 'path'
-import { js, tsx, vue } from '@ast-grep/napi'
 
 interface ImportDetail {
   path: string
@@ -37,116 +36,73 @@ interface DependencyGraph {
   }>
 }
 
-// Extract imports from a TypeScript/Vue file using AST
+// Extract imports from a TypeScript/Vue file using regex
 function extractImports(filePath: string): ImportInfo {
   const content = fs.readFileSync(filePath, 'utf-8')
   const imports: Map<string, ImportDetail> = new Map()
 
-  try {
-    // Determine the parser based on file extension
-    const ext = path.extname(filePath)
-    let lang = js
-
-    if (ext === '.tsx') {
-      lang = tsx
-    } else if (ext === '.vue') {
-      // For Vue files, extract script content first
-      const scriptMatch = content.match(/<script[^>]*>([\s\S]*?)<\/script>/)
-      if (scriptMatch) {
-        const scriptContent = scriptMatch[1]
-        const isTypeScript = /<script[^>]*lang=["']ts["']/.test(content)
-        lang = isTypeScript ? tsx : js
-        processContent(scriptContent, lang)
-      }
-      return { source: filePath, imports: Array.from(imports.values()) }
+  // For Vue files, extract script content first
+  let codeContent = content
+  if (filePath.endsWith('.vue')) {
+    const scriptMatch = content.match(/<script[^>]*>([\s\S]*?)<\/script>/)
+    if (scriptMatch) {
+      codeContent = scriptMatch[1]
     }
+  }
 
-    processContent(content, lang)
-  } catch (error) {
-    // Fallback to regex if AST parsing fails
-    // Match various import patterns
-    const patterns = [
-      // import type { ... } from 'path' or import type ... from 'path'
-      /import\s+type\s+(?:[^\s]+|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]/g,
-      // import { type ... } from 'path'
-      /import\s+\{[^}]*type[^}]*\}\s+from\s+['"]([^'"]+)['"]/g,
-      // Regular imports: import ... from 'path'
-      /import\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"]([^'"]+)['"]/g,
-      // Side effect imports: import 'path'
-      /import\s+['"]([^'"]+)['"]/g
-    ]
+  // Match various import patterns
+  const patterns = [
+    // import type { ... } from 'path' or import type ... from 'path'
+    /import\s+type\s+(?:[^s]+|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]/g,
+    // import { type ... } from 'path' - with type keyword inside braces
+    /import\s+\{[^}]*\btype\b[^}]*\}\s+from\s+['"]([^'"]+)['"]/g,
+  ]
 
-    patterns.forEach((regex, index) => {
-      let match
-      const isTypeOnly = index < 2 // First two patterns are type-only
-      regex.lastIndex = 0 // Reset regex state
-      while ((match = regex.exec(content)) !== null) {
-        const importPath = match[1]
-        if (importPath && !imports.has(importPath)) {
-          imports.set(importPath, { path: importPath, typeOnly: isTypeOnly })
-        } else if (importPath && !isTypeOnly && imports.get(importPath)?.typeOnly) {
-          // Runtime import overrides type-only
-          imports.set(importPath, { path: importPath, typeOnly: false })
-        }
-      }
-    })
-
-    // Dynamic imports are always runtime
-    const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g
-    while ((match = dynamicImportRegex.exec(content)) !== null) {
+  // First check for type-only imports
+  patterns.forEach((regex, index) => {
+    let match
+    regex.lastIndex = 0
+    while ((match = regex.exec(codeContent)) !== null) {
       const importPath = match[1]
-      if (importPath && !imports.has(importPath)) {
+      if (importPath) {
+        imports.set(importPath, { path: importPath, typeOnly: true })
+      }
+    }
+  })
+
+  // Then check all imports (including regular ones)
+  // This will override type-only if we find a runtime import for the same path
+  const allImportsRegex = /import\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"]([^'"]+)['"]/g
+  let match
+  while ((match = allImportsRegex.exec(codeContent)) !== null) {
+    const importPath = match[1]
+    const isTypeImport = match[0].includes('import type') || match[0].includes('{ type')
+
+    if (importPath) {
+      if (!imports.has(importPath)) {
+        imports.set(importPath, { path: importPath, typeOnly: isTypeImport })
+      } else if (!isTypeImport && imports.get(importPath)?.typeOnly) {
+        // Runtime import overrides type-only
         imports.set(importPath, { path: importPath, typeOnly: false })
       }
     }
   }
 
-  function processContent(code: string, lang: any) {
-    try {
-      const sg = lang.parse(code).root()
+  // Side effect imports: import 'path'
+  const sideEffectRegex = /import\s+['"]([^'"]+)['"]/g
+  while ((match = sideEffectRegex.exec(codeContent)) !== null) {
+    const importPath = match[1]
+    if (importPath && !imports.has(importPath)) {
+      imports.set(importPath, { path: importPath, typeOnly: false })
+    }
+  }
 
-      // Find all import declarations
-      // Match: import ... from 'path'
-      const importPattern = 'import $$$SPECS from $SOURCE'
-      sg.findAll(importPattern).forEach((node: any) => {
-        const source = node.getMatch('SOURCE')
-        if (source) {
-          const sourcePath = source.text().replace(/['"`]/g, '')
-          const fullImport = node.text()
-          const isTypeOnly = fullImport.includes('import type') || fullImport.includes('type {')
-
-          if (!imports.has(sourcePath)) {
-            imports.set(sourcePath, { path: sourcePath, typeOnly: isTypeOnly })
-          } else if (!isTypeOnly && imports.get(sourcePath)?.typeOnly) {
-            // If we have both type and runtime imports, mark as runtime
-            imports.set(sourcePath, { path: sourcePath, typeOnly: false })
-          }
-        }
-      })
-
-      // Find type-only imports: import type { ... } from 'path'
-      const typeImportPattern = 'import type $$$SPECS from $SOURCE'
-      sg.findAll(typeImportPattern).forEach((node: any) => {
-        const source = node.getMatch('SOURCE')
-        if (source) {
-          const sourcePath = source.text().replace(/['"`]/g, '')
-          if (!imports.has(sourcePath)) {
-            imports.set(sourcePath, { path: sourcePath, typeOnly: true })
-          }
-        }
-      })
-
-      // Find dynamic imports - these are always runtime
-      const dynamicImportPattern = 'import($SOURCE)'
-      sg.findAll(dynamicImportPattern).forEach((node: any) => {
-        const source = node.getMatch('SOURCE')
-        if (source) {
-          const sourcePath = source.text().replace(/['"`]/g, '')
-          imports.set(sourcePath, { path: sourcePath, typeOnly: false })
-        }
-      })
-    } catch (e) {
-      // Silent fail, will use regex fallback
+  // Dynamic imports are always runtime
+  const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  while ((match = dynamicImportRegex.exec(codeContent)) !== null) {
+    const importPath = match[1]
+    if (importPath && !imports.has(importPath)) {
+      imports.set(importPath, { path: importPath, typeOnly: false })
     }
   }
 
@@ -514,17 +470,17 @@ function generateHTML(graph: DependencyGraph): string {
       background: #1a1a1a;
       color: #fff;
     }
-    
+
     #container {
       display: flex;
       height: 100vh;
     }
-    
+
     #graph {
       flex: 1;
       position: relative;
     }
-    
+
     #sidebar {
       width: 300px;
       background: #2a2a2a;
@@ -532,17 +488,17 @@ function generateHTML(graph: DependencyGraph): string {
       overflow-y: auto;
       border-left: 1px solid #3a3a3a;
     }
-    
+
     h1 {
       margin: 0 0 20px 0;
       font-size: 1.5em;
       color: #fff;
     }
-    
+
     .stats {
       margin-bottom: 30px;
     }
-    
+
     .stat-item {
       display: flex;
       justify-content: space-between;
@@ -551,28 +507,28 @@ function generateHTML(graph: DependencyGraph): string {
       background: #1a1a1a;
       border-radius: 4px;
     }
-    
+
     .legend {
       margin-top: 30px;
     }
-    
+
     .legend-item {
       display: flex;
       align-items: center;
       margin: 8px 0;
     }
-    
+
     .legend-color {
       width: 12px;
       height: 12px;
       border-radius: 50%;
       margin-right: 10px;
     }
-    
+
     .controls {
       margin-top: 30px;
     }
-    
+
     button {
       display: block;
       width: 100%;
@@ -585,11 +541,11 @@ function generateHTML(graph: DependencyGraph): string {
       cursor: pointer;
       font-size: 14px;
     }
-    
+
     button:hover {
       background: #5a5a5a;
     }
-    
+
     .node-tooltip {
       position: absolute;
       padding: 10px;
@@ -618,7 +574,7 @@ function generateHTML(graph: DependencyGraph): string {
       font-size: 11px;
       margin-top: 3px;
     }
-    
+
     .search-box {
       width: 100%;
       padding: 10px;
@@ -629,7 +585,7 @@ function generateHTML(graph: DependencyGraph): string {
       border-radius: 4px;
       font-size: 14px;
     }
-    
+
     .highlighted {
       stroke: #ff0 !important;
       stroke-width: 3px !important;
@@ -644,7 +600,7 @@ function generateHTML(graph: DependencyGraph): string {
     </div>
     <div id="sidebar">
       <h1>Import Map</h1>
-      
+
       <div class="stats">
         <div class="stat-item">
           <span>Total Files:</span>
@@ -663,9 +619,9 @@ function generateHTML(graph: DependencyGraph): string {
           <span id="type-circular">${graph.circularDependencies?.filter(d => d.typeOnly).length || 0}</span>
         </div>
       </div>
-      
+
       <input type="text" class="search-box" placeholder="Search files..." id="search">
-      
+
       <div class="legend">
         <h3>Categories</h3>
         <div class="legend-item">
@@ -717,7 +673,7 @@ function generateHTML(graph: DependencyGraph): string {
           <span>Type-only Import</span>
         </div>
       </div>
-      
+
       <div class="controls">
         <button onclick="resetZoom()">Reset View</button>
         <button onclick="toggleSimulation()">Toggle Physics</button>
@@ -725,34 +681,34 @@ function generateHTML(graph: DependencyGraph): string {
       </div>
     </div>
   </div>
-  
+
   <script>
     const graphData = ${JSON.stringify(graph, null, 2)};
-    
+
     // Color scheme for different groups
     const colorScale = d3.scaleOrdinal()
       .domain(['components', 'stores', 'services', 'views', 'composables', 'utils', 'types', 'external', 'other'])
       .range(['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', '#dfe6e9', '#fab1a0', '#a29bfe', '#636e72']);
-    
+
     // Setup SVG
     const width = window.innerWidth - 300;
     const height = window.innerHeight;
-    
+
     const svg = d3.select('#svg')
       .attr('width', width)
       .attr('height', height);
-    
+
     const g = svg.append('g');
-    
+
     // Setup zoom
     const zoom = d3.zoom()
       .scaleExtent([0.1, 10])
       .on('zoom', (event) => {
         g.attr('transform', event.transform);
       });
-    
+
     svg.call(zoom);
-    
+
     // Create force simulation
     const simulation = d3.forceSimulation(graphData.nodes)
       .force('link', d3.forceLink(graphData.links)
@@ -761,7 +717,7 @@ function generateHTML(graph: DependencyGraph): string {
       .force('charge', d3.forceManyBody().strength(-300))
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force('collision', d3.forceCollide().radius(d => Math.sqrt(d.size) * 5));
-    
+
     // Create links
     const link = g.append('g')
       .selectAll('line')
@@ -779,7 +735,7 @@ function generateHTML(graph: DependencyGraph): string {
       })
       .attr('stroke-width', d => d.isCircular ? Math.sqrt(d.value) * 1.5 : Math.sqrt(d.value))
       .attr('stroke-dasharray', d => d.typeOnly ? '5,3' : 'none');
-    
+
     // Create nodes
     const node = g.append('g')
       .selectAll('circle')
@@ -790,7 +746,7 @@ function generateHTML(graph: DependencyGraph): string {
       .attr('stroke', d => d.inCircularDep ? '#ff0000' : '#fff')
       .attr('stroke-width', d => d.inCircularDep ? 3 : 1.5)
       .call(drag(simulation));
-    
+
     // Add labels for important nodes
     const label = g.append('g')
       .selectAll('text')
@@ -801,10 +757,10 @@ function generateHTML(graph: DependencyGraph): string {
       .style('fill', '#fff')
       .attr('dx', 15)
       .attr('dy', 4);
-    
+
     // Tooltip
     const tooltip = d3.select('.node-tooltip');
-    
+
     node.on('mouseover', (event, d) => {
       const connections = graphData.links.filter(l => l.source.id === d.id || l.target.id === d.id);
 
@@ -868,7 +824,7 @@ function generateHTML(graph: DependencyGraph): string {
     .on('mouseout', () => {
       tooltip.style('opacity', 0);
     });
-    
+
     // Update positions
     simulation.on('tick', () => {
       link
@@ -876,16 +832,16 @@ function generateHTML(graph: DependencyGraph): string {
         .attr('y1', d => d.source.y)
         .attr('x2', d => d.target.x)
         .attr('y2', d => d.target.y);
-      
+
       node
         .attr('cx', d => d.x)
         .attr('cy', d => d.y);
-      
+
       label
         .attr('x', d => d.x)
         .attr('y', d => d.y);
     });
-    
+
     // Drag behavior
     function drag(simulation) {
       function dragstarted(event) {
@@ -893,47 +849,47 @@ function generateHTML(graph: DependencyGraph): string {
         event.subject.fx = event.subject.x;
         event.subject.fy = event.subject.y;
       }
-      
+
       function dragged(event) {
         event.subject.fx = event.x;
         event.subject.fy = event.y;
       }
-      
+
       function dragended(event) {
         if (!event.active) simulation.alphaTarget(0);
         event.subject.fx = null;
         event.subject.fy = null;
       }
-      
+
       return d3.drag()
         .on('start', dragstarted)
         .on('drag', dragged)
         .on('end', dragended);
     }
-    
+
     // Search functionality
     document.getElementById('search').addEventListener('input', (e) => {
       const searchTerm = e.target.value.toLowerCase();
-      
+
       node.classed('highlighted', false);
-      
+
       if (searchTerm) {
-        node.classed('highlighted', d => 
-          d.label.toLowerCase().includes(searchTerm) || 
+        node.classed('highlighted', d =>
+          d.label.toLowerCase().includes(searchTerm) ||
           d.id.toLowerCase().includes(searchTerm)
         );
       }
     });
-    
+
     // Control functions
     let simulationRunning = true;
-    
+
     function resetZoom() {
       svg.transition()
         .duration(750)
         .call(zoom.transform, d3.zoomIdentity);
     }
-    
+
     function toggleSimulation() {
       if (simulationRunning) {
         simulation.stop();
@@ -942,24 +898,24 @@ function generateHTML(graph: DependencyGraph): string {
       }
       simulationRunning = !simulationRunning;
     }
-    
+
     function exportData() {
       const dataStr = JSON.stringify(graphData, null, 2);
       const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-      
+
       const exportFileDefaultName = 'import-map.json';
-      
+
       const linkElement = document.createElement('a');
       linkElement.setAttribute('href', dataUri);
       linkElement.setAttribute('download', exportFileDefaultName);
       linkElement.click();
     }
-    
+
     // Resize handler
     window.addEventListener('resize', () => {
       const newWidth = window.innerWidth - 300;
       const newHeight = window.innerHeight;
-      
+
       svg.attr('width', newWidth).attr('height', newHeight);
       simulation.force('center', d3.forceCenter(newWidth / 2, newHeight / 2));
       simulation.alpha(0.3).restart();
@@ -995,6 +951,15 @@ async function main() {
     const htmlPath = path.join(process.cwd(), 'import-map.html')
     fs.writeFileSync(htmlPath, html)
     console.log(`Saved HTML visualization to ${htmlPath}`)
+
+    // Also copy to dist/index.html for deployment
+    const distDir = path.join(process.cwd(), 'dist')
+    if (!fs.existsSync(distDir)) {
+      fs.mkdirSync(distDir, { recursive: true })
+    }
+    const distIndexPath = path.join(distDir, 'index.html')
+    fs.writeFileSync(distIndexPath, html)
+    console.log(`Saved deployment file to ${distIndexPath}`)
 
     console.log('✅ Import map generation complete!')
     console.log(
