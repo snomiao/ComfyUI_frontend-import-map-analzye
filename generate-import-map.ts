@@ -2,10 +2,16 @@
 import glob from 'fast-glob'
 import fs from 'fs'
 import path from 'path'
+import { js, tsx, vue } from '@ast-grep/napi'
+
+interface ImportDetail {
+  path: string
+  typeOnly: boolean
+}
 
 interface ImportInfo {
   source: string
-  imports: string[]
+  imports: ImportDetail[]
 }
 
 interface DependencyGraph {
@@ -22,36 +28,131 @@ interface DependencyGraph {
     target: string
     value: number
     isCircular?: boolean
+    typeOnly?: boolean
   }>
   circularDependencies?: Array<{
     chain: string[]
     edges: Array<{ source: string; target: string }>
+    typeOnly: boolean
   }>
 }
 
-// Extract imports from a TypeScript/Vue file
+// Extract imports from a TypeScript/Vue file using AST
 function extractImports(filePath: string): ImportInfo {
   const content = fs.readFileSync(filePath, 'utf-8')
-  const imports: string[] = []
+  const imports: Map<string, ImportDetail> = new Map()
 
-  // Match ES6 import statements
-  const importRegex =
-    /import\s+(?:(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+)?['"]([^'"]+)['"]/g
-  let match
+  try {
+    // Determine the parser based on file extension
+    const ext = path.extname(filePath)
+    let lang = js
 
-  while ((match = importRegex.exec(content)) !== null) {
-    if (match[1]) imports.push(match[1])
+    if (ext === '.tsx') {
+      lang = tsx
+    } else if (ext === '.vue') {
+      // For Vue files, extract script content first
+      const scriptMatch = content.match(/<script[^>]*>([\s\S]*?)<\/script>/)
+      if (scriptMatch) {
+        const scriptContent = scriptMatch[1]
+        const isTypeScript = /<script[^>]*lang=["']ts["']/.test(content)
+        lang = isTypeScript ? tsx : js
+        processContent(scriptContent, lang)
+      }
+      return { source: filePath, imports: Array.from(imports.values()) }
+    }
+
+    processContent(content, lang)
+  } catch (error) {
+    // Fallback to regex if AST parsing fails
+    // Match various import patterns
+    const patterns = [
+      // import type { ... } from 'path' or import type ... from 'path'
+      /import\s+type\s+(?:[^\s]+|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]/g,
+      // import { type ... } from 'path'
+      /import\s+\{[^}]*type[^}]*\}\s+from\s+['"]([^'"]+)['"]/g,
+      // Regular imports: import ... from 'path'
+      /import\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+['"]([^'"]+)['"]/g,
+      // Side effect imports: import 'path'
+      /import\s+['"]([^'"]+)['"]/g
+    ]
+
+    patterns.forEach((regex, index) => {
+      let match
+      const isTypeOnly = index < 2 // First two patterns are type-only
+      regex.lastIndex = 0 // Reset regex state
+      while ((match = regex.exec(content)) !== null) {
+        const importPath = match[1]
+        if (importPath && !imports.has(importPath)) {
+          imports.set(importPath, { path: importPath, typeOnly: isTypeOnly })
+        } else if (importPath && !isTypeOnly && imports.get(importPath)?.typeOnly) {
+          // Runtime import overrides type-only
+          imports.set(importPath, { path: importPath, typeOnly: false })
+        }
+      }
+    })
+
+    // Dynamic imports are always runtime
+    const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+    while ((match = dynamicImportRegex.exec(content)) !== null) {
+      const importPath = match[1]
+      if (importPath && !imports.has(importPath)) {
+        imports.set(importPath, { path: importPath, typeOnly: false })
+      }
+    }
   }
 
-  // Also match dynamic imports
-  const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g
-  while ((match = dynamicImportRegex.exec(content)) !== null) {
-    if (match[1]) imports.push(match[1])
+  function processContent(code: string, lang: any) {
+    try {
+      const sg = lang.parse(code).root()
+
+      // Find all import declarations
+      // Match: import ... from 'path'
+      const importPattern = 'import $$$SPECS from $SOURCE'
+      sg.findAll(importPattern).forEach((node: any) => {
+        const source = node.getMatch('SOURCE')
+        if (source) {
+          const sourcePath = source.text().replace(/['"`]/g, '')
+          const fullImport = node.text()
+          const isTypeOnly = fullImport.includes('import type') || fullImport.includes('type {')
+
+          if (!imports.has(sourcePath)) {
+            imports.set(sourcePath, { path: sourcePath, typeOnly: isTypeOnly })
+          } else if (!isTypeOnly && imports.get(sourcePath)?.typeOnly) {
+            // If we have both type and runtime imports, mark as runtime
+            imports.set(sourcePath, { path: sourcePath, typeOnly: false })
+          }
+        }
+      })
+
+      // Find type-only imports: import type { ... } from 'path'
+      const typeImportPattern = 'import type $$$SPECS from $SOURCE'
+      sg.findAll(typeImportPattern).forEach((node: any) => {
+        const source = node.getMatch('SOURCE')
+        if (source) {
+          const sourcePath = source.text().replace(/['"`]/g, '')
+          if (!imports.has(sourcePath)) {
+            imports.set(sourcePath, { path: sourcePath, typeOnly: true })
+          }
+        }
+      })
+
+      // Find dynamic imports - these are always runtime
+      const dynamicImportPattern = 'import($SOURCE)'
+      sg.findAll(dynamicImportPattern).forEach((node: any) => {
+        const source = node.getMatch('SOURCE')
+        if (source) {
+          const sourcePath = source.text().replace(/['"`]/g, '')
+          imports.set(sourcePath, { path: sourcePath, typeOnly: false })
+        }
+      })
+    } catch (e) {
+      // Silent fail, will use regex fallback
+    }
   }
 
   return {
     source: filePath,
-    imports: [...new Set(imports)] // Remove duplicates
+    imports: Array.from(imports.values())
   }
 }
 
@@ -100,11 +201,13 @@ function detectCircularDependencies(
 ): Array<{
   chain: string[]
   edges: Array<{ source: string; target: string }>
+  typeOnly: boolean
 }> {
   const adjacencyList = new Map<string, Set<string>>()
   const circularDeps: Array<{
     chain: string[]
     edges: Array<{ source: string; target: string }>
+    typeOnly: boolean
   }> = []
 
   // Build adjacency list
@@ -139,11 +242,20 @@ function detectCircularDependencies(
 
           // Create edges for the circular dependency
           const edges: Array<{ source: string; target: string }> = []
+          let allTypeOnly = true
+
           for (let i = 0; i < chain.length - 1; i++) {
             const source = chain[i]
             const target = chain[i + 1]
             if (source && target) {
               edges.push({ source, target })
+
+              // Check if this edge is runtime (not type-only)
+              const linkKey = `${source}->${target}`
+              const link = links.get(linkKey)
+              if (link && !link.typeOnly) {
+                allTypeOnly = false
+              }
             }
           }
 
@@ -155,7 +267,7 @@ function detectCircularDependencies(
           })
 
           if (isNew) {
-            circularDeps.push({ chain, edges })
+            circularDeps.push({ chain, edges, typeOnly: allTypeOnly })
           }
         }
       }
@@ -209,7 +321,7 @@ async function generateDependencyGraph(): Promise<DependencyGraph> {
   >()
   const links = new Map<
     string,
-    { source: string; target: string; value: number; isCircular?: boolean }
+    { source: string; target: string; value: number; isCircular?: boolean; typeOnly?: boolean }
   >()
 
   // Process each file
@@ -228,17 +340,17 @@ async function generateDependencyGraph(): Promise<DependencyGraph> {
     }
 
     // Process imports
-    for (const importPath of importInfo.imports) {
-      const resolvedPath = resolveImportPath(importPath, file)
+    for (const importDetail of importInfo.imports) {
+      const resolvedPath = resolveImportPath(importDetail.path, file)
       let targetId: string
 
       // Check if it's an external module
       if (!resolvedPath.startsWith('/') && !resolvedPath.startsWith('.')) {
-        targetId = `external:${importPath}`
+        targetId = `external:${importDetail.path}`
         if (!nodes.has(targetId)) {
           nodes.set(targetId, {
             id: targetId,
-            label: importPath,
+            label: importDetail.path,
             group: 'external',
             size: 1
           })
@@ -282,12 +394,18 @@ async function generateDependencyGraph(): Promise<DependencyGraph> {
       // Add link
       const linkKey = `${sourceId}->${targetId}`
       if (links.has(linkKey)) {
-        links.get(linkKey)!.value++
+        const existingLink = links.get(linkKey)!
+        existingLink.value++
+        // If we have both type and runtime imports, mark as runtime
+        if (existingLink.typeOnly && !importDetail.typeOnly) {
+          existingLink.typeOnly = false
+        }
       } else {
         links.set(linkKey, {
           source: sourceId,
           target: targetId,
-          value: 1
+          value: 1,
+          typeOnly: importDetail.typeOnly
         })
       }
 
@@ -331,10 +449,32 @@ async function generateDependencyGraph(): Promise<DependencyGraph> {
     }
   }
 
-  console.log(`Found ${circularDeps.length} circular dependencies:`)
-  circularDeps.forEach((dep, index) => {
-    console.log(`  ${index + 1}. ${dep.chain.join(' → ')}`)
+  // Sort circular deps: runtime first, then type-only
+  circularDeps.sort((a, b) => {
+    if (a.typeOnly === b.typeOnly) return 0
+    return a.typeOnly ? 1 : -1
   })
+
+  console.log(`Found ${circularDeps.length} circular dependencies:`)
+  const runtimeCircular = circularDeps.filter(d => !d.typeOnly)
+  const typeOnlyCircular = circularDeps.filter(d => d.typeOnly)
+
+  if (runtimeCircular.length > 0) {
+    console.log(`\n  ⚠️  Runtime circular dependencies (${runtimeCircular.length}):`)
+    runtimeCircular.forEach((dep, index) => {
+      console.log(`    ${index + 1}. ${dep.chain.join(' → ')}`)
+    })
+  }
+
+  if (typeOnlyCircular.length > 0) {
+    console.log(`\n  ℹ️  Type-only circular dependencies (${typeOnlyCircular.length}):`)
+    typeOnlyCircular.slice(0, 5).forEach((dep, index) => {
+      console.log(`    ${index + 1}. ${dep.chain.join(' → ')}`)
+    })
+    if (typeOnlyCircular.length > 5) {
+      console.log(`    ... and ${typeOnlyCircular.length - 5} more`)
+    }
+  }
 
   // Change back to original directory before returning
   process.chdir(originalCwd)
@@ -503,8 +643,12 @@ function generateHTML(graph: DependencyGraph): string {
           <span id="total-links">${graph.links.length}</span>
         </div>
         <div class="stat-item" style="color: #ff6b6b;">
-          <span>Circular Dependencies:</span>
-          <span id="circular-deps">${graph.circularDependencies?.length || 0}</span>
+          <span>Runtime Circular:</span>
+          <span id="runtime-circular">${graph.circularDependencies?.filter(d => !d.typeOnly).length || 0}</span>
+        </div>
+        <div class="stat-item" style="color: #66aaff;">
+          <span>Type-only Circular:</span>
+          <span id="type-circular">${graph.circularDependencies?.filter(d => d.typeOnly).length || 0}</span>
         </div>
       </div>
       
@@ -551,6 +695,14 @@ function generateHTML(graph: DependencyGraph): string {
         <div class="legend-item">
           <div class="legend-color" style="background: none; border: 2px solid #ff0000;"></div>
           <span>Has Circular Dep</span>
+        </div>
+        <div class="legend-item" style="margin-top: 15px;">
+          <div style="width: 40px; height: 2px; background: #999; margin-right: 10px;"></div>
+          <span>Runtime Import</span>
+        </div>
+        <div class="legend-item">
+          <div style="width: 40px; height: 2px; background: #66aaff; margin-right: 10px; border-top: 2px dashed #66aaff; background: none;"></div>
+          <span>Type-only Import</span>
         </div>
       </div>
       
@@ -603,9 +755,18 @@ function generateHTML(graph: DependencyGraph): string {
       .selectAll('line')
       .data(graphData.links)
       .enter().append('line')
-      .attr('stroke', d => d.isCircular ? '#ff6666' : '#999')
-      .attr('stroke-opacity', d => d.isCircular ? 0.8 : 0.6)
-      .attr('stroke-width', d => d.isCircular ? Math.sqrt(d.value) * 1.5 : Math.sqrt(d.value));
+      .attr('stroke', d => {
+        if (d.isCircular) return '#ff6666';
+        if (d.typeOnly) return '#66aaff';
+        return '#999';
+      })
+      .attr('stroke-opacity', d => {
+        if (d.isCircular) return 0.8;
+        if (d.typeOnly) return 0.5;
+        return 0.6;
+      })
+      .attr('stroke-width', d => d.isCircular ? Math.sqrt(d.value) * 1.5 : Math.sqrt(d.value))
+      .attr('stroke-dasharray', d => d.typeOnly ? '5,3' : 'none');
     
     // Create nodes
     const node = g.append('g')
@@ -644,10 +805,25 @@ function generateHTML(graph: DependencyGraph): string {
 
       // Add circular dependency information if applicable
       if (d.inCircularDep && d.circularChains) {
-        tooltipContent += '<div class="circular-dep-warning">⚠️ Circular Dependency Detected!</div>';
+        const circularInfo = graphData.circularDependencies || [];
+        let hasRuntimeCircular = false;
+        let hasTypeOnlyCircular = false;
+
         d.circularChains.forEach((chain, index) => {
           // Only show chains that include this node
           if (chain.includes(d.id)) {
+            // Find if this chain is type-only
+            const chainInfo = circularInfo.find(c =>
+              JSON.stringify(c.chain.sort()) === JSON.stringify(chain.sort())
+            );
+            const isTypeOnly = chainInfo?.typeOnly || false;
+
+            if (isTypeOnly) {
+              hasTypeOnlyCircular = true;
+            } else {
+              hasRuntimeCircular = true;
+            }
+
             // Format the chain to show the cycle clearly
             const nodeIndex = chain.indexOf(d.id);
             const formattedChain = chain.map((node, i) => {
@@ -658,7 +834,15 @@ function generateHTML(graph: DependencyGraph): string {
               return basename;
             }).join(' → ');
 
-            tooltipContent += \`<div class="circular-chain">Chain \${index + 1}: \${formattedChain}</div>\`;
+            if (!hasRuntimeCircular && hasTypeOnlyCircular) {
+              tooltipContent += '<div class="circular-dep-warning" style="color: #66aaff;">ℹ️ Type-only Circular Dependency</div>';
+            } else if (hasRuntimeCircular && !hasTypeOnlyCircular) {
+              tooltipContent += '<div class="circular-dep-warning">⚠️ Runtime Circular Dependency!</div>';
+            }
+
+            const chainLabel = isTypeOnly ? '[Type-only]' : '[Runtime]';
+            const chainColor = isTypeOnly ? '#66aaff' : '#ff6b6b';
+            tooltipContent += \`<div class="circular-chain" style="color: \${chainColor};">\${chainLabel} Chain \${index + 1}: \${formattedChain}</div>\`;
           }
         });
       }
